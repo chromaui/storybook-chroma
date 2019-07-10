@@ -115,7 +115,7 @@ async function waitForBuild(client, variables, { diffs }) {
         diffs
           ? `${inProgressCount}/${pluralize(snapshotCount, 'snapshot')} remain to test. ` +
               `(${pluralize(changeCount, 'change')}, ${pluralize(errorCount, 'error')})`
-          : `${inProgressCount}/${pluralize(snapshotCount, 'snapshot')} remain to publish. `
+          : `${inProgressCount}/${pluralize(snapshotCount, 'story')} remain to publish. `
       );
     }
     await new Promise(resolve => setTimeout(resolve, BUILD_POLL_INTERVAL));
@@ -204,6 +204,7 @@ async function prepareAppOrBuild({
   buildScriptName,
   scriptName,
   commandName,
+  https,
   url,
   createTunnel,
   tunnelUrl,
@@ -217,7 +218,8 @@ async function prepareAppOrBuild({
 
       const child = await startApp({
         scriptName: buildScriptName,
-        args: ['--', '-o', buildDirName],
+        // Make storybook build as quiet as possible
+        args: ['--', '-o', buildDirName, '--quiet', '--loglevel', 'error'],
         inheritStdio: true,
       });
 
@@ -266,7 +268,7 @@ async function prepareAppOrBuild({
   let tunnel;
   let cleanupTunnel;
   try {
-    tunnel = await openTunnel({ tunnelUrl, port });
+    tunnel = await openTunnel({ tunnelUrl, port, https });
     cleanupTunnel = async () => {
       if (cleanup) {
         await cleanup();
@@ -380,6 +382,7 @@ export default async function runTest({
   scriptName,
   exec: commandName,
   noStart = false,
+  https,
   url,
   storybookBuildDir: dirname,
   only,
@@ -476,6 +479,7 @@ Or find your code on the manage page of an existing project.`);
     buildScriptName,
     scriptName,
     commandName,
+    https,
     url,
     createTunnel,
     tunnelUrl,
@@ -570,7 +574,7 @@ ${onlineHint}.`
         log(
           diffs
             ? `Build ${number} has ${pluralize(errorCount, 'error')}. ${onlineHint}.`
-            : `Build ${number} has published but we found errors. ${onlineHint}.`
+            : `Build ${number} was published but we found errors. ${onlineHint}.`
         );
         exitCode = 2;
         break;
@@ -601,7 +605,7 @@ ${onlineHint}.`
     }
   }
 
-  if (!checkPackageJson() && originalArgv && !fromCI && interactive) {
+  if (!checkPackageJson({ command: names.command }) && originalArgv && !fromCI && interactive) {
     const scriptCommand = `${names.envVar}=${appCode} ${names.command} ${originalArgv
       .slice(2)
       .join(' ')}`
