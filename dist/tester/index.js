@@ -115,7 +115,7 @@ async function waitForBuild(client, variables, { diffs }) {
         diffs
           ? `${inProgressCount}/${pluralize(snapshotCount, 'snapshot')} remain to test. ` +
               `(${pluralize(changeCount, 'change')}, ${pluralize(errorCount, 'error')})`
-          : `${inProgressCount}/${pluralize(snapshotCount, 'snapshot')} remain to publish. `
+          : `${inProgressCount}/${pluralize(snapshotCount, 'story')} remain to publish. `
       );
     }
     await new Promise(resolve => setTimeout(resolve, BUILD_POLL_INTERVAL));
@@ -204,6 +204,7 @@ async function prepareAppOrBuild({
   buildScriptName,
   scriptName,
   commandName,
+  https,
   url,
   createTunnel,
   tunnelUrl,
@@ -211,9 +212,9 @@ async function prepareAppOrBuild({
   if (dirname || buildScriptName) {
     let buildDirName = dirname;
     if (buildScriptName) {
-      log(`Building your storybook`);
+      log(`Building your Storybook`);
       ({ name: buildDirName } = dirSync({ unsafeCleanup: true, prefix: `${names.script}-` }));
-      debug(`Building storybook to ${buildDirName}`);
+      debug(`Building Storybook to ${buildDirName}`);
 
       const child = await startApp({
         scriptName: buildScriptName,
@@ -233,7 +234,7 @@ async function prepareAppOrBuild({
       });
     }
 
-    log(`Uploading your built storybook...`);
+    log(`Uploading your built Storybook...`);
     const isolatorUrl = await uploadToS3({ client, dirname: buildDirName });
     debug(`uploading to s3, got ${isolatorUrl}`);
     log(`Uploaded your build, verifying`);
@@ -243,15 +244,15 @@ async function prepareAppOrBuild({
 
   let cleanup;
   if (!noStart) {
-    log(`Starting storybook`);
+    log(`Starting Storybook`);
     const child = await startApp({ scriptName, commandName, url });
     cleanup = async () => denodeify(kill)(child.pid, 'SIGHUP');
-    log(`Started storybook at ${url}`);
+    log(`Started Storybook at ${url}`);
   } else if (url) {
     if (!(await checkResponse(url))) {
       throw new Error(`No server responding at ${url} -- make sure you've started it.`);
     }
-    log(`Detected storybook at ${url}`);
+    log(`Detected Storybook at ${url}`);
   }
 
   const { port, pathname, query, hash } = parse(url, true);
@@ -266,7 +267,7 @@ async function prepareAppOrBuild({
   let tunnel;
   let cleanupTunnel;
   try {
-    tunnel = await openTunnel({ tunnelUrl, port });
+    tunnel = await openTunnel({ tunnelUrl, port, https });
     cleanupTunnel = async () => {
       if (cleanup) {
         await cleanup();
@@ -356,7 +357,7 @@ async function getStoriesAndInfo({ only, list, isolatorUrl, verbose }) {
   const { storybookVersion, viewLayer } = getStorybookInfo();
 
   debug(
-    `Detected package version:${packageVersion}, storybook version:${storybookVersion}, view layer: ${viewLayer}`
+    `Detected package version:${packageVersion}, Storybook version:${storybookVersion}, view layer: ${viewLayer}`
   );
 
   return { runtimeSpecs, storybookVersion, viewLayer };
@@ -380,6 +381,7 @@ export default async function runTest({
   scriptName,
   exec: commandName,
   noStart = false,
+  https,
   url,
   storybookBuildDir: dirname,
   only,
@@ -476,6 +478,7 @@ Or find your code on the manage page of an existing project.`);
     buildScriptName,
     scriptName,
     commandName,
+    https,
     url,
     createTunnel,
     tunnelUrl,
@@ -570,7 +573,7 @@ ${onlineHint}.`
         log(
           diffs
             ? `Build ${number} has ${pluralize(errorCount, 'error')}. ${onlineHint}.`
-            : `Build ${number} has published but we found errors. ${onlineHint}.`
+            : `Build ${number} was published but we found errors. ${onlineHint}.`
         );
         exitCode = 2;
         break;

@@ -1,6 +1,6 @@
 import setupDebug from 'debug';
 import { readdirSync, statSync, createReadStream } from 'fs';
-import fetch from 'isomorphic-fetch';
+import fetch from 'node-fetch';
 import { join } from 'path';
 import { URL } from 'url';
 import progress from 'progress-stream';
@@ -80,6 +80,6 @@ export default async function uploadToS3({ client, dirname }) {
 
   await Promise.all(uploads);
 
-  // NOTE: storybook-specific
+  // NOTE: Storybook-specific
   return new URL('/iframe.html', domain).toString();
 }
