@@ -73,6 +73,7 @@ jest.mock('./package-json');
 jest.mock('./storybook', () => () => ({
   storybookVersion: 'storybookVersion',
   viewLayer: 'viewLayer',
+  addons: [],
 }));
 jest.mock('./upload-to-s3');
 jest.mock('./log', () => () => jest.fn());
