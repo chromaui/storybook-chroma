@@ -7,6 +7,7 @@ import { v4 as uuid } from 'uuid';
 import { parse, format } from 'url';
 import minimatch from 'minimatch';
 import { dirSync } from 'tmp';
+import { gte } from 'semver';
 
 import getRuntimeSpecs from './runtimes';
 import getStorybookInfo from './storybook';
@@ -27,10 +28,16 @@ const BUILD_POLL_INTERVAL = 1000;
 // about the user's build environment
 const ENVIRONMENT_WHITELIST = [/^GERRIT/, /^TRAVIS/];
 
+const STORYBOOK_CLI_FLAGS_BY_VERSION = {
+  '--ci': '4.0.0',
+  '--loglevel': '5.1.0',
+};
+
 const names =
   packageName === 'storybook-chromatic'
     ? {
         product: 'Chromatic',
+        packageName: 'storybook-chromatic',
         script: 'chromatic',
         command: 'chromatic test',
         envVar: 'CHROMATIC_APP_CODE',
@@ -38,6 +45,7 @@ const names =
       }
     : {
         product: 'Chroma',
+        packageName: 'storybook-chroma',
         script: 'chroma',
         command: 'chroma publish',
         envVar: 'CHROMA_APP_CODE',
@@ -69,6 +77,12 @@ const TesterCreateBuildMutation = `
         }
       }
     }
+  }
+`;
+
+const TesterSkipBuildMutation = `
+  mutation TesterSkipBuildMutation($appId: ObjID, $commit: String!) {
+    skipBuild(appId: $appId, commit: $commit)
   }
 `;
 
@@ -115,7 +129,7 @@ async function waitForBuild(client, variables, { diffs }) {
         diffs
           ? `${inProgressCount}/${pluralize(snapshotCount, 'snapshot')} remain to test. ` +
               `(${pluralize(changeCount, 'change')}, ${pluralize(errorCount, 'error')})`
-          : `${inProgressCount}/${pluralize(snapshotCount, 'snapshot')} remain to publish. `
+          : `${inProgressCount}/${pluralize(snapshotCount, 'story')} remain to publish. `
       );
     }
     await new Promise(resolve => setTimeout(resolve, BUILD_POLL_INTERVAL));
@@ -204,20 +218,31 @@ async function prepareAppOrBuild({
   buildScriptName,
   scriptName,
   commandName,
+  https,
   url,
   createTunnel,
   tunnelUrl,
+  storybookVersion,
 }) {
   if (dirname || buildScriptName) {
     let buildDirName = dirname;
     if (buildScriptName) {
-      log(`Building your storybook`);
+      log(`Building your Storybook`);
       ({ name: buildDirName } = dirSync({ unsafeCleanup: true, prefix: `${names.script}-` }));
-      debug(`Building storybook to ${buildDirName}`);
+      debug(`Building Storybook to ${buildDirName}`);
 
       const child = await startApp({
         scriptName: buildScriptName,
-        args: ['--', '-o', buildDirName],
+        // Make storybook build as quiet as possible
+        args: [
+          '--',
+          '-o',
+          buildDirName,
+          ...(storybookVersion &&
+          gte(storybookVersion, STORYBOOK_CLI_FLAGS_BY_VERSION['--loglevel'])
+            ? ['--loglevel', 'error']
+            : []),
+        ],
         inheritStdio: true,
       });
 
@@ -233,7 +258,7 @@ async function prepareAppOrBuild({
       });
     }
 
-    log(`Uploading your built storybook...`);
+    log(`Uploading your built Storybook...`);
     const isolatorUrl = await uploadToS3({ client, dirname: buildDirName });
     debug(`uploading to s3, got ${isolatorUrl}`);
     log(`Uploaded your build, verifying`);
@@ -243,15 +268,22 @@ async function prepareAppOrBuild({
 
   let cleanup;
   if (!noStart) {
-    log(`Starting storybook`);
-    const child = await startApp({ scriptName, commandName, url });
-    cleanup = async () => denodeify(kill)(child.pid, 'SIGHUP');
-    log(`Started storybook at ${url}`);
+    log(`Starting Storybook`);
+    const child = await startApp({
+      scriptName,
+      commandName,
+      url,
+      args: scriptName &&
+        storybookVersion &&
+        gte(storybookVersion, STORYBOOK_CLI_FLAGS_BY_VERSION['--ci']) && ['--', '--ci'],
+    });
+    cleanup = child && (async () => denodeify(kill)(child.pid, 'SIGHUP'));
+    log(`Started Storybook at ${url}`);
   } else if (url) {
     if (!(await checkResponse(url))) {
       throw new Error(`No server responding at ${url} -- make sure you've started it.`);
     }
-    log(`Detected storybook at ${url}`);
+    log(`Detected Storybook at ${url}`);
   }
 
   const { port, pathname, query, hash } = parse(url, true);
@@ -266,7 +298,7 @@ async function prepareAppOrBuild({
   let tunnel;
   let cleanupTunnel;
   try {
-    tunnel = await openTunnel({ tunnelUrl, port });
+    tunnel = await openTunnel({ tunnelUrl, port, https });
     cleanupTunnel = async () => {
       if (cleanup) {
         await cleanup();
@@ -318,7 +350,7 @@ async function prepareAppOrBuild({
   };
 }
 
-async function getStoriesAndInfo({ only, list, isolatorUrl, verbose }) {
+async function getStories({ only, list, isolatorUrl, verbose }) {
   let predicate = () => true;
   if (only) {
     const match = only.match(/(.*):([^:]*)/);
@@ -343,7 +375,7 @@ async function getStoriesAndInfo({ only, list, isolatorUrl, verbose }) {
       return story;
     };
   }
-  const runtimeSpecs = (await getRuntimeSpecs(isolatorUrl, { verbose }))
+  const runtimeSpecs = (await getRuntimeSpecs(isolatorUrl, { verbose, names }))
     .map(listStory)
     .filter(predicate);
 
@@ -353,13 +385,7 @@ async function getStoriesAndInfo({ only, list, isolatorUrl, verbose }) {
 
   log(`Found ${pluralize(runtimeSpecs.length, 'story')}`);
 
-  const { storybookVersion, viewLayer } = getStorybookInfo();
-
-  debug(
-    `Detected package version:${packageVersion}, storybook version:${storybookVersion}, view layer: ${viewLayer}`
-  );
-
-  return { runtimeSpecs, storybookVersion, viewLayer };
+  return runtimeSpecs;
 }
 
 async function getEnvironment() {
@@ -380,9 +406,11 @@ export default async function runTest({
   scriptName,
   exec: commandName,
   noStart = false,
+  https,
   url,
   storybookBuildDir: dirname,
   only,
+  skip,
   list,
   fromCI: inputFromCI = false,
   autoAcceptChanges = false,
@@ -423,10 +451,6 @@ Pass your app code with the \`${names.envVar}\` environment variable or the \`--
     );
   }
 
-  if (!(buildScriptName || scriptName || commandName || noStart)) {
-    throw new Error('Either buildScriptName, scriptName, commandName or noStart is required');
-  }
-
   try {
     const { createAppToken: jwtToken } = await client.runQuery(TesterCreateAppTokenMutation, {
       appCode,
@@ -452,6 +476,18 @@ Or find your code on the manage page of an existing project.`);
     fromCI,
   } = await getCommitAndBranch({ inputFromCI });
 
+  if (skip) {
+    if (await client.runQuery(TesterSkipBuildMutation, { commit })) {
+      log(`Build skipped for commit ${commit}.`);
+      return 0;
+    }
+    throw new Error('Failed to skip build.');
+  }
+
+  if (!(buildScriptName || scriptName || commandName || noStart)) {
+    throw new Error('Either buildScriptName, scriptName, commandName or noStart is required');
+  }
+
   // These three options can be branch specific
   const doAutoAcceptChanges =
     typeof autoAcceptChanges === 'string' ? autoAcceptChanges === branch : autoAcceptChanges;
@@ -468,14 +504,21 @@ Or find your code on the manage page of an existing project.`);
   });
   debug(`Found baselineCommits: ${baselineCommits}`);
 
+  const { storybookVersion, viewLayer } = getStorybookInfo();
+  debug(
+    `Detected package version:${packageVersion}, storybook version:${storybookVersion}, view layer: ${viewLayer}`
+  );
+
   let exitCode = 5;
   const { cleanup, isolatorUrl, cachedUrl } = await prepareAppOrBuild({
+    storybookVersion,
     client,
     dirname,
     noStart,
     buildScriptName,
     scriptName,
     commandName,
+    https,
     url,
     createTunnel,
     tunnelUrl,
@@ -484,12 +527,13 @@ Or find your code on the manage page of an existing project.`);
   log(`Uploading and verifying build (this may take a few minutes depending on your connection)`);
 
   try {
-    const { runtimeSpecs, storybookVersion, viewLayer } = await getStoriesAndInfo({
+    const runtimeSpecs = await getStories({
       only,
       list,
       isolatorUrl,
       verbose,
     });
+
     const environment = await getEnvironment();
 
     const {
@@ -570,7 +614,7 @@ ${onlineHint}.`
         log(
           diffs
             ? `Build ${number} has ${pluralize(errorCount, 'error')}. ${onlineHint}.`
-            : `Build ${number} has published but we found errors. ${onlineHint}.`
+            : `Build ${number} was published but we found errors. ${onlineHint}.`
         );
         exitCode = 2;
         break;
@@ -601,7 +645,7 @@ ${onlineHint}.`
     }
   }
 
-  if (!checkPackageJson() && originalArgv && !fromCI && interactive) {
+  if (!checkPackageJson({ command: names.command }) && originalArgv && !fromCI && interactive) {
     const scriptCommand = `${names.envVar}=${appCode} ${names.command} ${originalArgv
       .slice(2)
       .join(' ')}`
@@ -609,21 +653,15 @@ ${onlineHint}.`
       .trim();
 
     const confirmed = await confirm(
-      `\nYou have not added the \`${
-        names.script
-      }\` script to your \`package.json\`. Would you like me to do it for you?`
+      `\nYou have not added the \`${names.script}\` script to your \`package.json\`. Would you like me to do it for you?`
     );
     if (confirmed) {
       addScriptToPackageJson(names.script, scriptCommand);
       log(
         `
-Added script \`${names.script}\`. You can now run it here or in CI with \`npm run ${
-          names.script
-        }\` (or \`yarn ${names.script}\`)
+Added script \`${names.script}\`. You can now run it here or in CI with \`npm run ${names.script}\` (or \`yarn ${names.script}\`)
 
-NOTE: I wrote your app code to the \`${
-          names.envVar
-        }\` environment variable. The app code cannot be used to read story data, it can only be used to create new builds. If you would still prefer not to check it into source control, you can remove it from \`package.json\` and set it via an environment variable instead.`,
+NOTE: I wrote your app code to the \`${names.envVar}\` environment variable. The app code cannot be used to read story data, it can only be used to create new builds. If you would still prefer not to check it into source control, you can remove it from \`package.json\` and set it via an environment variable instead.`,
         { noPrefix: true }
       );
     } else {
@@ -632,7 +670,7 @@ NOTE: I wrote your app code to the \`${
 No problem. You can add it later with:
 {
   "scripts": {
-    "${names.scriptName}": "${scriptCommand}"
+    "${names.script}": "${scriptCommand}"
   }
 }`,
         { noPrefix: true }
